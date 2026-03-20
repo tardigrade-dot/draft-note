@@ -1,42 +1,34 @@
+mod frontend;
+mod model;
+
 use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Module, VarBuilder};
 use candle_transformers::models::qwen3::{Config as Qwen3Config, Model as Qwen3Model};
 use candle_transformers::generation::LogitsProcessor;
 use clap::Parser;
-use fun_asr_nano::funasr::frontend::WavFrontend;
-use fun_asr_nano::funasr::model::{AudioAdaptor, CTCDecoder, SenseVoiceEncoderSmall};
-use std::path::PathBuf;
 use tokenizers::Tokenizer;
+use std::path::PathBuf;
+
+use crate::frontend::WavFrontend;
+use crate::model::{SenseVoiceEncoderSmall, AudioAdaptor, CTCDecoder};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(
-        long,
-        default_value = "/Volumes/sw/pretrained_models/Fun-ASR-Nano-2512/model.safetensors"
-    )]
-    model: String,
+    #[arg(long)]
+    model: PathBuf,
 
-    #[arg(
-        long,
-        default_value = "/Volumes/sw/pretrained_models/Fun-ASR-Nano-2512/config.yaml"
-    )]
-    config: String,
+    #[arg(long)]
+    config: PathBuf,
 
-    #[arg(
-        long,
-        default_value = "/Volumes/sw/pretrained_models/Fun-ASR-Nano-2512/multilingual.tiktoken"
-    )]
-    tokenizer: String,
+    #[arg(long)]
+    tokenizer: PathBuf,
 
-    #[arg(
-        long,
-        default_value = "/Users/larry/coderesp/draft-note/assets/qinsheng.wav"
-    )]
-    wav: String,
+    #[arg(long)]
+    wav: PathBuf,
 
-    #[arg(long, default_value = "metal")]
+    #[arg(long, default_value = "cpu")]
     device: String,
 }
 
@@ -54,8 +46,9 @@ fn main() -> Result<()> {
     let config: serde_yaml::Value = serde_yaml::from_str(&config_str)?;
 
     // 2. Load Model Weights
-    let vb =
-        unsafe { VarBuilder::from_mmaped_safetensors(&[args.model.clone()], DType::F32, &device)? };
+    let vb = unsafe {
+        VarBuilder::from_mmaped_safetensors(&[args.model], DType::F32, &device)?
+    };
 
     // 3. Initialize Components
     let frontend_conf = &config["frontend_conf"];
@@ -71,7 +64,7 @@ fn main() -> Result<()> {
     let enc_conf = &config["audio_encoder_conf"];
     let encoder = SenseVoiceEncoderSmall::load(
         vb.pp("audio_encoder"),
-        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize,
+        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize * frontend_conf["lfr_m"].as_u64().unwrap_or(7) as usize,
         enc_conf["output_size"].as_u64().unwrap_or(512) as usize,
         enc_conf["attention_heads"].as_u64().unwrap_or(4) as usize,
         enc_conf["linear_units"].as_u64().unwrap_or(2048) as usize,
@@ -99,20 +92,13 @@ fn main() -> Result<()> {
         60514, // Default blank id
     )?;
 
-    // Qwen3 (similar to Qwen2)
-    let qwen_config_path = PathBuf::new()
-        .join(args.model)
-        .join("Qwen3-0.6B")
-        .join("config.json");
+    // Qwen3
+    let qwen_config_path = args.config.parent().unwrap().join("Qwen3-0.6B").join("config.json");
     let qwen_config_str = std::fs::read_to_string(qwen_config_path)?;
     let qwen_config: Qwen3Config = serde_json::from_str(&qwen_config_str)?;
 
-    let qwen_emb = candle_nn::embedding(
-        qwen_config.vocab_size,
-        qwen_config.hidden_size,
-        vb.pp("llm.model.embed_tokens"),
-    )?;
-    let mut qwen = Qwen2Model::new(&qwen_config, vb.pp("llm"))?;
+    let qwen_emb = candle_nn::embedding(qwen_config.vocab_size, qwen_config.hidden_size, vb.pp("llm.model.embed_tokens"))?;
+    let mut qwen = Qwen3Model::new(&qwen_config, vb.pp("llm"))?;
 
     let tokenizer = Tokenizer::from_file(args.tokenizer).map_err(|e| anyhow!(e))?;
 
@@ -146,9 +132,7 @@ fn main() -> Result<()> {
         }
         prev_id = id;
     }
-    let ctc_text = tokenizer
-        .decode(&decoded_ctc_ids, true)
-        .map_err(|e| anyhow!(e))?;
+    let ctc_text = tokenizer.decode(&decoded_ctc_ids, true).map_err(|e| anyhow!(e))?;
     println!("CTC Result: {}", ctc_text);
 
     // 7. LLM Integration
@@ -171,10 +155,7 @@ fn main() -> Result<()> {
     let mut generated_tokens = Vec::new();
     let mut current_embeds = inputs_embeds;
 
-    let eos_token_id = tokenizer
-        .token_to_id("<|im_end|>")
-        .or_else(|| tokenizer.token_to_id("<|endoftext|>"))
-        .unwrap_or(151643);
+    let eos_token_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(151643);
 
     for _i in 0..512 {
         let logits = qwen.forward(&current_embeds, 0)?;
@@ -193,9 +174,7 @@ fn main() -> Result<()> {
         current_embeds = Tensor::cat(&[&current_embeds, &next_emb], 1)?;
     }
 
-    let decoded = tokenizer
-        .decode(&generated_tokens, true)
-        .map_err(|e| anyhow!(e))?;
+    let decoded = tokenizer.decode(&generated_tokens, true).map_err(|e| anyhow!(e))?;
     println!("ASR Result: {}", decoded);
 
     // 9. Timestamps (Forced Alignment placeholder)
