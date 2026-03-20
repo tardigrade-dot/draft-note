@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Module, VarBuilder};
-use candle_transformers::models::qwen3::{Config as Qwen3Config, Model as Qwen3Model};
 use candle_transformers::generation::LogitsProcessor;
+use candle_transformers::models::qwen3::{Config as Qwen3Config, Model as Qwen3Model};
 use clap::Parser;
 use fun_asr_nano::funasr::frontend::WavFrontend;
 use fun_asr_nano::funasr::model::{AudioAdaptor, CTCDecoder, SenseVoiceEncoderSmall};
@@ -112,7 +112,7 @@ fn main() -> Result<()> {
         qwen_config.hidden_size,
         vb.pp("llm.model.embed_tokens"),
     )?;
-    let mut qwen = Qwen2Model::new(&qwen_config, vb.pp("llm"))?;
+    let mut qwen = Qwen3Model::new(&qwen_config, vb.pp("llm"))?;
 
     let tokenizer = Tokenizer::from_file(args.tokenizer).map_err(|e| anyhow!(e))?;
 
