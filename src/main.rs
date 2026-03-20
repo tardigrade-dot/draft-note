@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Module, VarBuilder};
+use candle_transformers::models::qwen3::{Config as Qwen3Config, Model as Qwen3Model};
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::qwen2::{Config as Qwen2Config, Model as Qwen2Model};
 use clap::Parser;
 use fun_asr_nano::funasr::frontend::WavFrontend;
 use fun_asr_nano::funasr::model::{AudioAdaptor, CTCDecoder, SenseVoiceEncoderSmall};
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         .join("Qwen3-0.6B")
         .join("config.json");
     let qwen_config_str = std::fs::read_to_string(qwen_config_path)?;
-    let qwen_config: Qwen2Config = serde_json::from_str(&qwen_config_str)?;
+    let qwen_config: Qwen3Config = serde_json::from_str(&qwen_config_str)?;
 
     let qwen_emb = candle_nn::embedding(
         qwen_config.vocab_size,
@@ -177,7 +177,7 @@ fn main() -> Result<()> {
         .unwrap_or(151643);
 
     for _i in 0..512 {
-        let logits = qwen.forward(&current_embeds, 0, None)?;
+        let logits = qwen.forward(&current_embeds, 0)?;
         let logits = logits.squeeze(0)?;
         let logits = logits.get(logits.dim(0)? - 1)?;
         let next_token = logits_processor.sample(&logits)?;
