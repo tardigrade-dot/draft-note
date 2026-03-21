@@ -59,19 +59,23 @@ fn main() -> Result<()> {
 
     // 3. Initialize Components
     let frontend_conf = &config["frontend_conf"];
+    let n_mels = frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize;
+    let lfr_m = frontend_conf["lfr_m"].as_u64().unwrap_or(7) as usize;
+    let lfr_n = frontend_conf["lfr_n"].as_u64().unwrap_or(6) as usize;
+
     let frontend = WavFrontend::new(
         frontend_conf["fs"].as_u64().unwrap_or(16000) as usize,
-        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize,
+        n_mels,
         frontend_conf["frame_length"].as_u64().unwrap_or(25) as usize,
         frontend_conf["frame_shift"].as_u64().unwrap_or(10) as usize,
-        frontend_conf["lfr_m"].as_u64().unwrap_or(7) as usize,
-        frontend_conf["lfr_n"].as_u64().unwrap_or(6) as usize,
+        lfr_m,
+        lfr_n,
     );
 
     let enc_conf = &config["audio_encoder_conf"];
     let encoder = SenseVoiceEncoderSmall::load(
         vb.pp("audio_encoder"),
-        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize,
+        n_mels * lfr_m, // Crucial: input is stacked
         enc_conf["output_size"].as_u64().unwrap_or(512) as usize,
         enc_conf["attention_heads"].as_u64().unwrap_or(4) as usize,
         enc_conf["linear_units"].as_u64().unwrap_or(2048) as usize,
@@ -99,11 +103,8 @@ fn main() -> Result<()> {
         60514, // Default blank id
     )?;
 
-    // Qwen3 (similar to Qwen2)
-    let qwen_config_path = PathBuf::new()
-        .join(args.model)
-        .join("Qwen3-0.6B")
-        .join("config.json");
+    // Qwen3
+    let qwen_config_path = PathBuf::from(&args.model).parent().unwrap().join("Qwen3-0.6B").join("config.json");
     let qwen_config_str = std::fs::read_to_string(qwen_config_path)?;
     let qwen_config: Qwen3Config = serde_json::from_str(&qwen_config_str)?;
 
@@ -124,15 +125,9 @@ fn main() -> Result<()> {
         .collect();
 
     let fbank = frontend.extract_fbank(&samples)?;
-    // For this model, LFR stacking seems to be disabled or not used at the encoder input
-    // as evidenced by the weight shapes [1536, 80].
-    let num_frames = fbank.len();
-    let mut flat_fbank = Vec::with_capacity(num_frames * 80);
-    for frame in fbank {
-        flat_fbank.extend_from_slice(&frame);
-    }
-    let feat_tensor = Tensor::from_vec(flat_fbank, (1, num_frames, 80), &device)?;
-    let ilens = Tensor::from_vec(vec![num_frames as u32], (1,), &device)?;
+    let (lfr_feat, t_lfr) = frontend.apply_lfr(&fbank);
+    let feat_tensor = Tensor::from_vec(lfr_feat, (1, t_lfr, n_mels * lfr_m), &device)?;
+    let ilens = Tensor::from_vec(vec![t_lfr as u32], (1,), &device)?;
 
     // 5. Encoder and Adaptor forward
     let (enc_out, _olens) = encoder.forward(&feat_tensor, &ilens)?;
@@ -143,7 +138,7 @@ fn main() -> Result<()> {
     let ctc_ids = ctc_logits.squeeze(0)?.argmax(1)?;
     let ctc_ids_vec = ctc_ids.to_vec1::<i64>()?;
 
-    // Simple CTC Greedy Decoding for reference text (though we usually use LLM text)
+    // Simple CTC Greedy Decoding
     let mut prev_id = -1;
     let mut decoded_ctc_ids = Vec::new();
     for &id in ctc_ids_vec.iter() {
@@ -203,11 +198,6 @@ fn main() -> Result<()> {
         .decode(&generated_tokens, true)
         .map_err(|e| anyhow!(e))?;
     println!("ASR Result: {}", decoded);
-
-    // 9. Timestamps (Forced Alignment placeholder)
-    // In a full implementation, we'd call ctc_forced_align(ctc_logits, decoded_ids, ...)
-    // and then convert frame indices to time.
-    // Frame duration: 10ms (frame_shift) * 6 (lfr_n) = 60ms per LFR frame.
 
     Ok(())
 }
