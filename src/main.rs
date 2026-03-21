@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     let enc_conf = &config["audio_encoder_conf"];
     let encoder = SenseVoiceEncoderSmall::load(
         vb.pp("audio_encoder"),
-        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize * frontend_conf["lfr_m"].as_u64().unwrap_or(7) as usize,
+        frontend_conf["n_mels"].as_u64().unwrap_or(80) as usize,
         enc_conf["output_size"].as_u64().unwrap_or(512) as usize,
         enc_conf["attention_heads"].as_u64().unwrap_or(4) as usize,
         enc_conf["linear_units"].as_u64().unwrap_or(2048) as usize,
@@ -124,9 +124,15 @@ fn main() -> Result<()> {
         .collect();
 
     let fbank = frontend.extract_fbank(&samples)?;
-    let (lfr_feat, t_lfr) = frontend.apply_lfr(&fbank);
-    let feat_tensor = Tensor::from_vec(lfr_feat, (1, t_lfr, 80 * 7), &device)?;
-    let ilens = Tensor::from_vec(vec![t_lfr as u32], (1,), &device)?;
+    // For this model, LFR stacking seems to be disabled or not used at the encoder input
+    // as evidenced by the weight shapes [1536, 80].
+    let num_frames = fbank.len();
+    let mut flat_fbank = Vec::with_capacity(num_frames * 80);
+    for frame in fbank {
+        flat_fbank.extend_from_slice(&frame);
+    }
+    let feat_tensor = Tensor::from_vec(flat_fbank, (1, num_frames, 80), &device)?;
+    let ilens = Tensor::from_vec(vec![num_frames as u32], (1,), &device)?;
 
     // 5. Encoder and Adaptor forward
     let (enc_out, _olens) = encoder.forward(&feat_tensor, &ilens)?;
